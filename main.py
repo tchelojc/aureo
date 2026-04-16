@@ -13,29 +13,17 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import math
-import os
-import urllib.request
 from datetime import datetime
-
-# ══════════════════════════════════════════════════════════════════
-# TENTAR IMPORTAR BIBLIOTECAS CIENTÍFICAS (OPCIONAIS)
-# ══════════════════════════════════════════════════════════════════
-try:
-    import rebound
-    import assist
-    REBOUND_AVAILABLE = True
-except ImportError:
-    REBOUND_AVAILABLE = False
 
 # ══════════════════════════════════════════════════════════════════
 # CONSTANTES FÍSICAS E FLUXOMATEMÁTICO
 # ══════════════════════════════════════════════════════════════════
 G       = 6.67430e-11        # Constante gravitacional (m³ kg⁻¹ s⁻²)
 c       = 2.99792458e8       # Velocidade da luz (m/s)
-h_planck = 6.62607015e-34    # Constante de Planck (J·s)
-e_carga = 1.602176634e-19    # Carga do elétron (C)
-AU      = 1.495978707e11     # Unidade Astronômica (m)
-ano_luz = 9.4607304725808e15 # Metro por ano-luz
+h_planck = 6.62607015e-34   # Constante de Planck (J·s)
+e_carga = 1.602176634e-19   # Carga do elétron (C)
+AU      = 1.495978707e11    # Unidade Astronômica (m)
+ano_luz = 9.4607304725808e15  # Metro por ano-luz
 
 # ── FluxoMatemático ──────────────────────────────────────────────
 PHI        = 1.61803398875   # Proporção Áurea
@@ -151,21 +139,9 @@ PLANETAS_NASA = {
 }
 
 # ══════════════════════════════════════════════════════════════════
-# FUNÇÃO DE DOWNLOAD DAS EFEMÉRIDES DE440 (NASA JPL)
+# MOTOR ORBITAL KEPLERIANO (NASA-GRADE)
 # ══════════════════════════════════════════════════════════════════
-def baixar_de440():
-    """Baixa o arquivo de efemérides DE440.bsp se não existir."""
-    url = "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp"
-    destino = "de440.bsp"
-    if not os.path.exists(destino):
-        with st.spinner("📡 Baixando efemérides DE440 (NASA JPL) - ~100 MB. Aguarde..."):
-            urllib.request.urlretrieve(url, destino)
-    return destino
-
-# ══════════════════════════════════════════════════════════════════
-# MOTOR ORBITAL KEPLERIANO (NASA-GRADE) – MODO PADRÃO
-# ══════════════════════════════════════════════════════════════════
-def calcular_posicoes_keplerianas(data_hora):
+def calcular_posicoes_orbitais(data_hora):
     """
     Calcula posições 3D de todos os planetas via mecânica Kepleriana.
     O Sol fica em (0,0,0) com vetor de rotação inclinado 7.25° em relação
@@ -178,7 +154,9 @@ def calcular_posicoes_keplerianas(data_hora):
     posicoes = {}
 
     # ── Sol: posição central + eixo de rotação inclinado ──────────
+    # O eixo de rotação solar está inclinado 7.25° em relação ao polo eclíptico
     inc_sol_rad = math.radians(7.25)
+    # Vetor do eixo de rotação solar (aponta para "cima" mas desviado 7.25°)
     eixo_sol = np.array([
         math.sin(inc_sol_rad),   # componente X da inclinação
         0.0,
@@ -206,9 +184,11 @@ def calcular_posicoes_keplerianas(data_hora):
         if nome == 'sol':
             continue
 
+        # Anomalia média M
         M = (2 * math.pi * dias_julianos / cfg['periodo']) % (2 * math.pi)
         e = cfg['excentricidade']
 
+        # Resolver equação de Kepler iterativamente
         E = M
         for _ in range(15):
             dE = (M - (E - e * math.sin(E))) / (1 - e * math.cos(E))
@@ -216,15 +196,18 @@ def calcular_posicoes_keplerianas(data_hora):
             if abs(dE) < 1e-10:
                 break
 
+        # Posição no plano orbital
         a = cfg['raio_orbita']
         x_orb = a * (math.cos(E) - e)
         y_orb = a * math.sqrt(1 - e ** 2) * math.sin(E)
 
+        # Argumento do periélio (lentamente precessionando)
         arg_peri = math.radians(102.9 + 0.001 * dias_julianos / 365.25)
         cos_w, sin_w = math.cos(arg_peri), math.sin(arg_peri)
         x1 = x_orb * cos_w - y_orb * sin_w
         y1 = x_orb * sin_w + y_orb * cos_w
 
+        # Inclinação orbital em relação à eclíptica
         incl_rad = math.radians(cfg['inclinacao'])
         x_f = x1
         y_f = y1 * math.cos(incl_rad)
@@ -251,80 +234,6 @@ def calcular_posicoes_keplerianas(data_hora):
 
     return posicoes, dias_julianos
 
-# ══════════════════════════════════════════════════════════════════
-# MOTOR ORBITAL DE ALTA PRECISÃO (N-CORPOS + RELATIVIDADE)
-# ══════════════════════════════════════════════════════════════════
-def calcular_posicoes_n_corpos(data_hora, incluir_relatividade=True):
-    """
-    Calcula posições planetárias usando integração de N-corpos com REBOUND + ASSIST.
-    Precisão comparável à NASA HORIZONS (DE440).
-    """
-    if not REBOUND_AVAILABLE:
-        st.error("Bibliotecas REBOUND/ASSIST não instaladas. Use o modo Kepleriano.")
-        return None, None
-
-    arquivo_bsp = baixar_de440()
-    ephem = assist.Ephem(arquivo_bsp, data_hora)
-    sim = rebound.Simulation()
-    sim.integrator = "ias15"
-    sim.dt = 0.1
-
-    assist.add_planets(sim, ephem)
-
-    if incluir_relatividade:
-        sim.additional_forces = rebound.InterpolatingGRForce()
-
-    epoch_j2000 = datetime(2000, 1, 1, 12, 0, 0)
-    t_segundos = (data_hora - epoch_j2000).total_seconds()
-    sim.integrate(t_segundos)
-
-    nomes = ['mercurio', 'venus', 'terra', 'marte', 'jupiter', 'saturno', 'urano', 'netuno']
-    posicoes = {}
-    for i, nome in enumerate(nomes):
-        p = sim.particles[i+1]  # partícula 0 é o Sol
-        posicoes[nome] = {
-            'posicao': (p.x, p.y, p.z),
-            'angulo': float(math.atan2(p.y, p.x) % (2*math.pi)),
-            'raio_orbita': np.linalg.norm([p.x, p.y, p.z]),
-            'excentricidade': PLANETAS_NASA[nome]['excentricidade'],
-            'inclinacao': PLANETAS_NASA[nome]['inclinacao'],
-            'cor': PLANETAS_NASA[nome]['cor'],
-            'tamanho_relativo': PLANETAS_NASA[nome]['tamanho_relativo'],
-            'elemento': PLANETAS_NASA[nome]['elemento'],
-            'influencia': PLANETAS_NASA[nome]['influencia'],
-            'massa_relativa': PLANETAS_NASA[nome]['massa_relativa'],
-            'temperatura_superficie': PLANETAS_NASA[nome]['temperatura_superficie'],
-            'velocidade_orbital_km_s': np.linalg.norm([p.vx, p.vy, p.vz]) * 1e-3,
-            'velocidade_angular': 0.0,
-            'periodo_orbital': PLANETAS_NASA[nome]['periodo'],
-            'eh_sol': False,
-            'luas': PLANETAS_NASA[nome]['luas']
-        }
-
-    # Sol
-    posicoes['sol'] = {
-        'posicao': (0.0, 0.0, 0.0),
-        'angulo': 0.0,
-        'raio_orbita': 0.0,
-        'inclinacao': 7.25,
-        'cor': PLANETAS_NASA['sol']['cor'],
-        'tamanho_relativo': PLANETAS_NASA['sol']['tamanho_relativo'],
-        'elemento': PLANETAS_NASA['sol']['elemento'],
-        'influencia': PLANETAS_NASA['sol']['influencia'],
-        'massa_relativa': PLANETAS_NASA['sol']['massa_relativa'],
-        'temperatura_superficie': PLANETAS_NASA['sol']['temperatura_superficie'],
-        'velocidade_orbital_km_s': 0.0,
-        'eixo_rotacao': [0.0, 0.0, 1.0],
-        'eh_sol': True,
-        'luas': []
-    }
-
-    dias_julianos = (data_hora - epoch_j2000).total_seconds() / 86400.0
-    return posicoes, dias_julianos
-
-# ══════════════════════════════════════════════════════════════════
-# FUNÇÕES AUXILIARES (ALINHAMENTOS, TECIDO, ETC.) – MANTIDAS COMO ESTAVAM
-# ══════════════════════════════════════════════════════════════════
 
 def calcular_alinhamentos(posicoes):
     """Detecta aspectos astrológicos/astronômicos entre pares de planetas."""
@@ -378,6 +287,7 @@ def calcular_alinhamentos(posicoes):
                 })
                 break
     return alinhamentos
+
 
 # ══════════════════════════════════════════════════════════════════
 # TECIDO ESPAÇO-TEMPO 3D COM MASSA PROPORCIONAL + DIREÇÃO SOLAR
@@ -891,12 +801,10 @@ def modulo_captacao_energia():
 # ══════════════════════════════════════════════════════════════════
 # MÓDULO 3 — SISTEMA PLANETÁRIO E ESPAÇO-TEMPO
 # ══════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════
-# MÓDULO 3 — SISTEMA PLANETÁRIO E ESPAÇO-TEMPO (ATUALIZADO)
-# ══════════════════════════════════════════════════════════════════
 def modulo_sistema_planetario():
     st.markdown("## 🪐 Sistema Planetário e Espaço-Tempo")
 
+    # Data/hora para cálculo orbital
     col1, col2 = st.columns(2)
     with col1:
         data_calc = st.date_input("Data de Referência", value=datetime.now().date())
@@ -906,32 +814,13 @@ def modulo_sistema_planetario():
 
     data_hora = datetime.combine(data_calc, hora_calc)
 
-    # Escolha do método de cálculo
-    metodo = st.radio(
-        "⚙️ Método de cálculo orbital:",
-        ["Kepleriano (rápido, educacional)", "N-Corpos + Relatividade (alta precisão, requer REBOUND)"],
-        index=0,
-        help="O método N-Corpos utiliza efemérides DE440 da NASA e integração numérica completa."
-    )
-
-    if "N-Corpos" in metodo and not REBOUND_AVAILABLE:
-        st.warning("Bibliotecas científicas (rebound, assist) não instaladas. Usando método Kepleriano.")
-        metodo = "Kepleriano"
-
-    with st.spinner("Calculando posições planetárias..."):
-        if "N-Corpos" in metodo:
-            posicoes, dias_j2000 = calcular_posicoes_n_corpos(data_hora, incluir_relatividade=True)
-            if posicoes is None:
-                st.error("Falha no cálculo N-Corpos. Usando método Kepleriano.")
-                posicoes, dias_j2000 = calcular_posicoes_keplerianas(data_hora)
-        else:
-            posicoes, dias_j2000 = calcular_posicoes_keplerianas(data_hora)
-
+    with st.spinner("Calculando posições planetárias com precisão Kepleriana..."):
+        posicoes, dias_j2000 = calcular_posicoes_orbitais(data_hora)
         alinhamentos = calcular_alinhamentos(posicoes)
 
-    st.success(f"✅ Calculado para J2000+{dias_j2000:.2f} dias | Método: {metodo} | {len(alinhamentos)} aspectos detectados")
+    st.success(f"✅ Calculado para J2000+{dias_j2000:.2f} dias | {len(alinhamentos)} aspectos detectados")
 
-    # Tabs de visualização (as mesmas de antes)
+    # Tabs de visualização
     tab1, tab2, tab3 = st.tabs(["🌌 Tecido Espaço-Tempo", "🪐 Órbitas 3D", "📊 Alinhamentos"])
 
     with tab1:
@@ -966,6 +855,7 @@ def modulo_sistema_planetario():
 
     with tab3:
         if alinhamentos:
+            # Gráfico de barras dos alinhamentos
             df_al = pd.DataFrame(alinhamentos)
             fig_al = go.Figure()
             for tipo in df_al['tipo'].unique():
@@ -984,6 +874,7 @@ def modulo_sistema_planetario():
             )
             st.plotly_chart(fig_al, use_container_width=True)
 
+            # Tabela detalhada
             df_show = df_al[['planeta1', 'planeta2', 'tipo', 'angulo_graus', 'intensidade',
                               'compatibilidade', 'distancia_ua']].copy()
             df_show.columns = ['Planeta 1', 'Planeta 2', 'Aspecto', 'Ângulo (°)',
@@ -994,7 +885,7 @@ def modulo_sistema_planetario():
             st.dataframe(df_show, use_container_width=True)
         else:
             st.info("Nenhum aspecto significativo detectado para esta data/hora.")
-            
+
 # ══════════════════════════════════════════════════════════════════
 # MÓDULO 4 — PLANETAS, LUAS E ESPAÇO-TEMPO (VISÃO DETALHADA)
 # ══════════════════════════════════════════════════════════════════
@@ -1630,7 +1521,7 @@ def main():
             "⚫ Buracos Negros e Anomalias",
             "⚡ Captação e Transformação de Energia",
             "🪐 Sistema Planetário e Espaço-Tempo",
-            "🪐 Planetas, Luas e Espaço-Tempo",
+            "🪐 Planetas, Luas e Espaço-Tempo",   # ← NOVA ABA
             "🎵 Frequências Áureas",
             "🌌 Aplicações Cósmicas",
             "📖 Ajuda e Orientação"
@@ -1664,6 +1555,7 @@ def main():
         modulo_aplicacoes_cosmicas()
     elif "Ajuda" in modulo:
         modulo_ajuda()
+
 
 if __name__ == "__main__":
     main()
